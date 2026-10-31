@@ -1,0 +1,34 @@
+// How much a typical hand-written TI query misses in *your* workspace.
+//
+// Compares the full set of usable IP / any indicators against three common
+// shortcuts:
+//   ipv4_only          ObservableKey == "ipv4-addr:value"
+//   with_threshold     Confidence >= 50 (null confidence silently fails)
+//   stale_versions     indicators that were active at some point, but whose
+//                      latest version is deleted, revoked, inactive or expired.
+//                      A query without `arg_max(...) by Id` can still match them.
+let threshold = 50;
+let latest = ThreatIntelIndicators
+    | summarize arg_max(TimeGenerated, *) by Id;
+let usable = latest
+    | where coalesce(IsDeleted, false) == false and coalesce(Revoked, false) == false
+    | where IsActive == true and (isnull(ValidUntil) or ValidUntil > now());
+let ip_keys = dynamic(["ipv4-addr:value", "ipv6-addr:value",
+                       "network-traffic:src_ref.value", "network-traffic:dst_ref.value"]);
+let stale = ThreatIntelIndicators
+    | where IsActive == true
+    | distinct Id
+    | join kind=inner (latest
+        | where coalesce(IsDeleted, false) or coalesce(Revoked, false) or IsActive == false
+                or (isnotnull(ValidUntil) and ValidUntil <= now())
+        | project Id) on Id
+    | count;
+usable
+| summarize
+    UsableIndicators = count(),
+    UsableIPs = countif(ObservableKey in (ip_keys)),
+    IPsFoundByIpv4Only = countif(ObservableKey == "ipv4-addr:value"),
+    KeptByThreshold = countif(Confidence >= threshold),
+    DroppedForNullConfidence = countif(isnull(Confidence))
+| extend IPsMissedByIpv4Only = UsableIPs - IPsFoundByIpv4Only
+| extend StaleVersionsStillMatchable = toscalar(stale)

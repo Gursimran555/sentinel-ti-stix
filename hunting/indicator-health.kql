@@ -1,0 +1,24 @@
+// Indicator health by type and source.
+// Answers: what do I actually have, how much of it has no confidence score,
+// and how much expires this week?
+let soon = 7d;
+ThreatIntelIndicators
+| summarize arg_max(TimeGenerated, *) by Id
+| where coalesce(IsDeleted, false) == false and coalesce(Revoked, false) == false
+| where IsActive == true and (isnull(ValidUntil) or ValidUntil > now())
+| extend IndicatorType = case(
+      ObservableKey in ("ipv4-addr:value", "ipv6-addr:value",
+                        "network-traffic:src_ref.value", "network-traffic:dst_ref.value"), "ip",
+      ObservableKey == "domain-name:value", "domain",
+      ObservableKey == "url:value", "url",
+      ObservableKey startswith "file:hashes", "file-hash",
+      ObservableKey == "email-addr:value", "email",
+      "other")
+| summarize Active = count(),
+            NoConfidence = countif(isnull(Confidence)),
+            AvgConfidence = round(avg(Confidence), 1),
+            ExpiringSoon = countif(isnotnull(ValidUntil) and ValidUntil < now() + soon),
+            ObservableKeys = make_set(ObservableKey)
+    by IndicatorType, SourceSystem
+| extend PctNoConfidence = round(100.0 * NoConfidence / Active, 1)
+| order by IndicatorType asc, Active desc

@@ -1,0 +1,50 @@
+// TIActiveIndicators
+// -----------------------------------------------------------------------------
+// One row per indicator that is usable for detection right now, from the
+// STIX-based ThreatIntelIndicators table.
+//
+// Save it as a workspace function named TIActiveIndicators with these two
+// parameters, or paste the body into a query after the two `let` lines.
+//
+//   min_confidence:int = 0          drop indicators below this confidence
+//   missing_confidence_as:int = 50  confidence to assume when the feed sent none
+//
+// Why each step is here:
+//   arg_max ... by Id   every update adds a new row. Without this, an older
+//                       "active" row of a since-deleted indicator still matches.
+//   coalesce(...)       a null IsDeleted/Revoked must not drop the row, and a
+//                       null Confidence must not vanish silently from a
+//                       `Confidence >= x` filter (Pulsedive sends none for URLs
+//                       and IPv6).
+//   IndicatorType       IPs arrive under four different ObservableKeys. Microsoft
+//                       Threat Intelligence publishes most of its IPs as
+//                       network-traffic:src_ref.value, not ipv4-addr:value.
+// -----------------------------------------------------------------------------
+let min_confidence = 0;
+let missing_confidence_as = 50;
+ThreatIntelIndicators
+| summarize arg_max(TimeGenerated, *) by Id
+| where coalesce(IsDeleted, false) == false
+| where coalesce(Revoked, false) == false
+| where IsActive == true
+| where isnull(ValidUntil) or ValidUntil > now()
+| extend ConfidenceMissing = isnull(Confidence)
+| extend EffectiveConfidence = iff(ConfidenceMissing, missing_confidence_as, toint(Confidence))
+| where EffectiveConfidence >= min_confidence
+| extend IndicatorType = case(
+      ObservableKey in ("ipv4-addr:value", "ipv6-addr:value",
+                        "network-traffic:src_ref.value", "network-traffic:dst_ref.value"), "ip",
+      ObservableKey == "domain-name:value", "domain",
+      ObservableKey == "url:value", "url",
+      ObservableKey startswith "file:hashes", "file-hash",
+      ObservableKey == "email-addr:value", "email",
+      "other")
+// Domains and e-mail addresses are case-insensitive; IPv6 is compared lowercased.
+| extend Value = iff(IndicatorType in ("domain", "email", "ip"), tolower(ObservableValue), ObservableValue)
+| extend Name = tostring(Data.name),
+         Description = tostring(Data.description),
+         ThreatType = tostring(Data.indicator_types[0]),
+         TLP = tostring(AdditionalFields.TLPLevel)
+| project Id, IndicatorType, ObservableKey, Value, EffectiveConfidence, ConfidenceMissing,
+          SourceSystem, ThreatType, Name, Description, TLP, Tags, ValidFrom, ValidUntil,
+          LastSeen = TimeGenerated

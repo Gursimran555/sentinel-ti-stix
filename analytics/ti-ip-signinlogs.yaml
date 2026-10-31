@@ -1,0 +1,90 @@
+id: 94c3c3ae-bb32-403c-b925-ac7547f91051
+name: TI (STIX) - Active IP indicator seen in Entra ID sign-ins
+description: |
+  'Matches active, current IP indicators from ThreatIntelIndicators against interactive
+  and non-interactive Entra ID sign-ins. Uses the latest version of each indicator only,
+  covers ipv4/ipv6/network-traffic observables, and keeps indicators that arrived without
+  a confidence score (flagged in ConfidenceMissing) instead of dropping them.'
+severity: Medium
+requiredDataConnectors:
+  - connectorId: ThreatIntelligence
+    dataTypes:
+      - ThreatIntelIndicators
+  - connectorId: ThreatIntelligenceTaxii
+    dataTypes:
+      - ThreatIntelIndicators
+  - connectorId: MicrosoftDefenderThreatIntelligence
+    dataTypes:
+      - ThreatIntelIndicators
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - SigninLogs
+      - AADNonInteractiveUserSignInLogs
+queryFrequency: 1h
+queryPeriod: 14d
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - InitialAccess
+  - CommandAndControl
+relevantTechniques:
+  - T1078
+  - T1071
+query: |
+  let ioc_lookBack = 14d;
+  let missing_confidence_as = 50;
+  let min_confidence = 0;
+  let TI = materialize(ThreatIntelIndicators
+      | where TimeGenerated >= ago(ioc_lookBack)
+      | summarize arg_max(TimeGenerated, *) by Id
+      | where coalesce(IsDeleted, false) == false
+      | where coalesce(Revoked, false) == false
+      | where IsActive == true
+      | where isnull(ValidUntil) or ValidUntil > now()
+      | extend ConfidenceMissing = isnull(Confidence)
+      | extend EffectiveConfidence = iff(ConfidenceMissing, missing_confidence_as, toint(Confidence))
+      | where EffectiveConfidence >= min_confidence
+      | extend IndicatorType = case(
+            ObservableKey in ("ipv4-addr:value", "ipv6-addr:value",
+                              "network-traffic:src_ref.value", "network-traffic:dst_ref.value"), "ip",
+            ObservableKey == "domain-name:value", "domain",
+            ObservableKey == "url:value", "url",
+            "other")
+      | extend Value = iff(IndicatorType in ("ip", "domain"), tolower(ObservableValue), ObservableValue)
+      | extend TI_Name = tostring(Data.name), TI_Description = tostring(Data.description),
+               TI_ThreatType = tostring(Data.indicator_types[0]), TI_TLP = tostring(AdditionalFields.TLPLevel)
+      | project TI_Id = Id, IndicatorType, Value, EffectiveConfidence, ConfidenceMissing, TI_Source = SourceSystem,
+                TI_Name, TI_Description, TI_ThreatType, TI_TLP, ValidUntil);
+  let dt_lookBack = 1h;
+  let Signins = union isfuzzy=true
+      (SigninLogs | where TimeGenerated >= ago(dt_lookBack)),
+      (AADNonInteractiveUserSignInLogs | where TimeGenerated >= ago(dt_lookBack))
+      | where isnotempty(IPAddress)
+      | extend IPKey = tolower(IPAddress)
+      | project SigninTime = TimeGenerated, UserPrincipalName, IPAddress, IPKey, AppDisplayName,
+                ResultType, Location;
+  TI
+  | where IndicatorType == "ip"
+  | join kind=inner (Signins) on $left.Value == $right.IPKey
+  | where SigninTime < ValidUntil or isnull(ValidUntil)
+  | summarize arg_max(SigninTime, *) by TI_Id, UserPrincipalName
+  | extend AccountName = tostring(split(UserPrincipalName, "@")[0]),
+           UPNSuffix = tostring(split(UserPrincipalName, "@")[1])
+  | project SigninTime, UserPrincipalName, AccountName, UPNSuffix, IPAddress, AppDisplayName, ResultType,
+            Location, EffectiveConfidence, ConfidenceMissing, TI_Source, TI_ThreatType, TI_Name,
+            TI_Description, TI_TLP, TI_Id
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserPrincipalName
+      - identifier: Name
+        columnName: AccountName
+      - identifier: UPNSuffix
+        columnName: UPNSuffix
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: IPAddress
+version: 1.0.0
+kind: Scheduled

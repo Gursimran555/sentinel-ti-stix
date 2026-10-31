@@ -1,0 +1,39 @@
+id: b25181bf-ea93-46b6-8e9c-69c29bdbfd87
+name: One account using RDP to reach many hosts
+description: |
+  'A single account completing RemoteInteractive (RDP) logons to several different
+  devices in an hour. Written to close a gap found on the workspace's MITRE ATT&CK page:
+  every Lateral Movement technique, including T1021 Remote Services, had no active rule.'
+severity: Medium
+requiredDataConnectors:
+  - connectorId: MicrosoftThreatProtection
+    dataTypes:
+      - DeviceLogonEvents
+queryFrequency: 1h
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - LateralMovement
+relevantTechniques:
+  - T1021.001
+query: |
+  let min_hosts = 3;
+  DeviceLogonEvents
+  | where TimeGenerated >= ago(1h)
+  | where LogonType == "RemoteInteractive" and ActionType == "LogonSuccess"
+  | where isnotempty(AccountName)
+  | summarize Hosts = dcount(DeviceName), HostList = make_set(DeviceName, 20),
+              Sources = make_set(RemoteIP, 10), FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated)
+      by AccountDomain, AccountName
+  | where Hosts >= min_hosts
+  | order by Hosts desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: Name
+        columnName: AccountName
+      - identifier: NTDomain
+        columnName: AccountDomain
+version: 1.0.0
+kind: Scheduled

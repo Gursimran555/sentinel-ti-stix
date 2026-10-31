@@ -1,0 +1,79 @@
+id: 956e9e0e-bb8e-4e1c-abbb-f28198b7873d
+name: TI (STIX) - Active IP indicator seen in firewall logs (CommonSecurityLog)
+description: |
+  'Matches active, current IP indicators against source or destination IPs in CEF firewall
+  logs (Palo Alto, Fortinet, Check Point and others). Uses the latest version of each
+  indicator and all four IP observable keys.'
+severity: Medium
+requiredDataConnectors:
+  - connectorId: ThreatIntelligence
+    dataTypes:
+      - ThreatIntelIndicators
+  - connectorId: ThreatIntelligenceTaxii
+    dataTypes:
+      - ThreatIntelIndicators
+  - connectorId: MicrosoftDefenderThreatIntelligence
+    dataTypes:
+      - ThreatIntelIndicators
+  - connectorId: CEF
+    dataTypes:
+      - CommonSecurityLog
+  - connectorId: PaloAltoNetworks
+    dataTypes:
+      - CommonSecurityLog
+queryFrequency: 1h
+queryPeriod: 14d
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - CommandAndControl
+relevantTechniques:
+  - T1071
+query: |
+  let ioc_lookBack = 14d;
+  let missing_confidence_as = 50;
+  let min_confidence = 0;
+  let TI = materialize(ThreatIntelIndicators
+      | where TimeGenerated >= ago(ioc_lookBack)
+      | summarize arg_max(TimeGenerated, *) by Id
+      | where coalesce(IsDeleted, false) == false
+      | where coalesce(Revoked, false) == false
+      | where IsActive == true
+      | where isnull(ValidUntil) or ValidUntil > now()
+      | extend ConfidenceMissing = isnull(Confidence)
+      | extend EffectiveConfidence = iff(ConfidenceMissing, missing_confidence_as, toint(Confidence))
+      | where EffectiveConfidence >= min_confidence
+      | extend IndicatorType = case(
+            ObservableKey in ("ipv4-addr:value", "ipv6-addr:value",
+                              "network-traffic:src_ref.value", "network-traffic:dst_ref.value"), "ip",
+            ObservableKey == "domain-name:value", "domain",
+            ObservableKey == "url:value", "url",
+            "other")
+      | extend Value = iff(IndicatorType in ("ip", "domain"), tolower(ObservableValue), ObservableValue)
+      | extend TI_Name = tostring(Data.name), TI_Description = tostring(Data.description),
+               TI_ThreatType = tostring(Data.indicator_types[0]), TI_TLP = tostring(AdditionalFields.TLPLevel)
+      | project TI_Id = Id, IndicatorType, Value, EffectiveConfidence, ConfidenceMissing, TI_Source = SourceSystem,
+                TI_Name, TI_Description, TI_ThreatType, TI_TLP, ValidUntil);
+  let dt_lookBack = 1h;
+  let Firewall = CommonSecurityLog
+      | where TimeGenerated >= ago(dt_lookBack)
+      | extend Pair = pack_array(tolower(SourceIP), tolower(DestinationIP))
+      | mv-expand IPKey = Pair to typeof(string)
+      | where isnotempty(IPKey)
+      | project FwTime = TimeGenerated, DeviceVendor, DeviceProduct, SourceIP, DestinationIP,
+                DestinationPort, DeviceAction, Activity, IPKey;
+  TI
+  | where IndicatorType == "ip"
+  | join kind=inner (Firewall) on $left.Value == $right.IPKey
+  | where FwTime < ValidUntil or isnull(ValidUntil)
+  | summarize FirstSeen = min(FwTime), LastSeen = max(FwTime), Events = count(),
+              Actions = make_set(DeviceAction, 10), Ports = make_set(DestinationPort, 10)
+      by TI_Id, MatchedIP = IPKey, SourceIP, DestinationIP, DeviceVendor, DeviceProduct,
+         EffectiveConfidence, ConfidenceMissing, TI_Source, TI_ThreatType, TI_Name, TI_Description
+entityMappings:
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: MatchedIP
+version: 1.0.0
+kind: Scheduled
